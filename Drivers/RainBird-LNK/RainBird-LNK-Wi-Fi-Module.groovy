@@ -55,6 +55,7 @@
 *  1.0.2.1  –– Added HTTPS transport for LNK2 module firmware that refuses plain HTTP on /stick; new Module Transport preference (Auto tries HTTPS then falls back to HTTP for first-generation LNK; remembers the working scheme).
 *  1.0.2.2  –– Fixed runZone() on legacy (≤2.10) controllers rejecting opcode 03; now always uses ManuallyRunStation (39 + 2-byte zone + duration), matching pyrainbird.
 *  1.0.2.3  –– Fixed BF active-zone decoding reporting zone 10 instead of 1 on non-hybrid controllers; first payload byte is always skipped (pyrainbird format).
+*  1.0.2.4  –– Fixed CombinedControllerState reporting Watering while idle; watering is now derived from the active station (zone > 0), with Rain Delay when a delay is set.
 */
 
 import groovy.transform.Field
@@ -67,7 +68,7 @@ import javax.crypto.spec.IvParameterSpec
 import java.io.ByteArrayOutputStream
 
 @Field static final String DRIVER_NAME     = "Rain Bird LNK/LNK2 WiFi Module Controller"
-@Field static final String DRIVER_VERSION  = "1.0.2.3"
+@Field static final String DRIVER_VERSION  = "1.0.2.4"
 @Field static final String DRIVER_MODIFIED = "2026.10.12"
 @Field static final String PAD="\u0016"
 @Field static final int BLOCK_SIZE=16
@@ -867,8 +868,8 @@ private parseCombinedControllerState(resp,boolean summaryOnly=false){
             def season=Integer.parseInt(hex[22..25],16);if(season==0xFFFF||season>300){season=100;logWarn"CombinedControllerState(CC): Invalid or reserved seasonal value (${season}); normalizing to 100%"}
             def remain=Integer.parseInt(hex[26..29],16)
             def zone=Integer.parseInt(hex[30..31],16)
-            def irrigationText=(irrig==1?"Watering":irrig==0?"Idle":irrig==2?"Rain Delay":"Unknown (${irrig})")
-            def watering=(irrig==1)
+            def irrigationText=(zone>0?"Watering":delay>0?"Rain Delay":"Idle")
+            def watering=(zone>0)
             def timeStr=sprintf("%02d:%02d:%02d",hour,minute,second)
             def dateStr=sprintf("%04d-%02d-%02d",year,month,day)
             emitChangedEvent("controllerTime",timeStr,"Controller time=${timeStr}")
