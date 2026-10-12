@@ -57,6 +57,7 @@
 *  1.0.2.3  –– Fixed BF active-zone decoding reporting zone 10 instead of 1 on non-hybrid controllers; first payload byte is always skipped (pyrainbird format).
 *  1.0.2.4  –– Fixed CombinedControllerState reporting Watering while idle; watering is now derived from the active station (zone > 0), with Rain Delay when a delay is set.
 *  1.0.2.5  –– Fixed CombinedControllerState year parsing as 4026 when the controller returns a full four-digit year.
+*  1.0.2.6  –– Added controller model name mapping (e.g. 010A → ESP-TM2) to the model attribute; raw model code retained.
 */
 
 import groovy.transform.Field
@@ -69,8 +70,9 @@ import javax.crypto.spec.IvParameterSpec
 import java.io.ByteArrayOutputStream
 
 @Field static final String DRIVER_NAME     = "Rain Bird LNK/LNK2 WiFi Module Controller"
-@Field static final String DRIVER_VERSION  = "1.0.2.5"
+@Field static final String DRIVER_VERSION  = "1.0.2.6"
 @Field static final String DRIVER_MODIFIED = "2026.10.12"
+@Field static final Map MODEL_NAMES=["0003":"ESP-RZXe","0005":"ESP-TM2","0006":"ST8x-WiFi","0007":"ESP-Me","0008":"ST8x-WiFi2","0009":"ESP-ME3","0010":"ESP-Me2","000A":"ESP-TM2","010A":"ESP-TM2","0099":"TBOS-BT","0100":"TBOS-BT","0103":"ESP-RZXe2","0107":"ESP-Me","0812":"ARC8"]
 @Field static final String PAD="\u0016"
 @Field static final int BLOCK_SIZE=16
 @Field static int delayMs=150
@@ -820,7 +822,8 @@ private getControllerIdentity() {
         } else {
             logWarn"ModelAndVersionRequest failed or unexpected: ${data02}"
         }
-        emitEvent("model","RainBird ${modelID}","Controller model: Rain Bird ${modelID}")
+        def mName=MODEL_NAMES[modelID?.toString()?.toUpperCase()]
+        emitEvent("model",mName?"RainBird ${mName} (${modelID})":"RainBird ${modelID}","Controller model: Rain Bird ${mName?:modelID}")
         emitEvent("controllerFirmwareVersion",fwareVersion,"Controller firmware version: ${fwareVersion}")
         def r05=parseIfString(sendRainbirdCommand("05",1),"getControllerIdentity-Serial")
         def data05=extractHexData(r05)
