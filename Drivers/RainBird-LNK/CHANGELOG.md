@@ -18,6 +18,7 @@ Licensed under the [Apache License 2.0](https://www.apache.org/licenses/LICENSE-
 | **1.0.0.0** | Production – Depricated | Verified for use with LNK and LNK/2 modules |
 | **1.0.1.0** | Production – Depricated | Added WaterSensor capability |
 | **1.0.2.0** | Full Production | Reduced controller transport contention by prioritizing zone control commands and deferring maintenance polling during irrigation.  |
+| **1.0.2.6** | Full Production | HTTPS transport for current LNK2 firmware (HTTP fallback for LNK) and ESP-TM2 / firmware 2.10 parsing and zone-run fixes. |
 
 ---
 
@@ -161,6 +162,14 @@ All command, telemetry, and refresh systems are now stable under both firmware l
 -   **Production Release 1.0.2.0**
 -- Improved irrigation reliability by prioritizing zone control commands over background telemetry, reducing transport contention during active watering.
 -- Gated maintenance polling to idle controller state.
+
+-   **Production Release 1.0.2.6**
+-- Added HTTPS transport for LNK2 module firmware that refuses plain HTTP on /stick; new Module Transport preference (Auto tries HTTPS, then falls back to HTTP for first-generation LNK).
+-- Zone runs now always use ManuallyRunStation (opcode 39); legacy opcode 03 was rejected by ESP-TM2 firmware 2.10.
+-- Fixed BF active-zone decoding (zone 1 was reported as 10).
+-- Watering state is now derived from the active station; idle controllers no longer show Watering.
+-- Fixed controller date year parsing as 4026.
+-- Added controller model name mapping (e.g. 010A → ESP-TM2).
 
 ---
 
