@@ -52,6 +52,7 @@
 *  1.0.1.0  –– Added WaterSensor capability and lowered accompanying minver to 2.9.
 *  1.0.1.1  –– Updated normalizeZoneInput() so a null capability response does not demote firmware 2.9+ to legacy mode.
 *  1.0.2.0  –– Improved irrigation reliability by prioritizing zone control commands over background telemetry, reducing transport contention during active watering; gated maintenance polling to idle controller state.
+*  1.0.2.1  –– Added HTTPS transport for LNK2 module firmware that refuses plain HTTP on /stick; new Module Transport preference (Auto tries HTTPS then falls back to HTTP for first-generation LNK; remembers the working scheme).
 */
 
 import groovy.transform.Field
@@ -64,8 +65,8 @@ import javax.crypto.spec.IvParameterSpec
 import java.io.ByteArrayOutputStream
 
 @Field static final String DRIVER_NAME     = "Rain Bird LNK/LNK2 WiFi Module Controller"
-@Field static final String DRIVER_VERSION  = "1.0.2.0"
-@Field static final String DRIVER_MODIFIED = "2026.07.12"
+@Field static final String DRIVER_VERSION  = "1.0.2.1"
+@Field static final String DRIVER_MODIFIED = "2026.10.12"
 @Field static final String PAD="\u0016"
 @Field static final int BLOCK_SIZE=16
 @Field static int delayMs=150
@@ -147,6 +148,7 @@ metadata {
         input("docBlock","hidden",title: driverDocBlock())
         input("ipAddress","text",title:"Rain Bird Controller IP",required:true)
         input("password","password",title:"Rain Bird Controller Password",required:true)
+        input("transport","enum",title:"Module Transport",description:"Auto tries HTTPS first (required by newer LNK2 firmware) and falls back to HTTP (first-generation LNK).",defaultValue:"auto",options:["auto":"Auto (HTTPS, fall back to HTTP)","https":"HTTPS only","http":"HTTP only"])
         input("zonePref","number",title:"Number of Zones",description:"Used <i>only</i> if the controller does not report available stations.<br>Leave unchanged unless running legacy firmware (≤2.11) or station detection fails.",defaultValue:6,range:"1..22")
         input("autoTimeSync","bool",title:"Automatically sync Rain Bird to Hubitat clock",description:"Corrects any drift greater than ±5 seconds.<br>Automatically adjusts controller clock for DST.",defaultValue:true)
         input name:"refreshInterval", type:"enum", title:"Refresh Interval",description:"Select from the list.",defaultValue:"5",
@@ -249,7 +251,7 @@ def testAllSupportedCommands(){
 		def mv=device.currentValue("moduleProtocolVersion")?:fw
 		if(!mv||mv=="unknown"||mv=="unavailable"){
 			try{
-				httpGet([uri:"http://${ipAddress}/irrigation/status.json",timeout:5]){resp->mv=resp?.data?.ver?:'unavailable'}
+				moduleRequest("GET","/irrigation/status.json",[timeout:5]){resp->mv=resp?.data?.ver?:'unavailable'}
 				emitEvent("moduleProtocolVersion",mv,"LNK/LNK2 module protocol ${mv}")
 			}catch(e){logDebug"Module protocol check failed: ${e.message}"}
 		}
@@ -826,7 +828,7 @@ private getControllerIdentity() {
 
 private getModuleProtocolVersion(){
 	def mv=null
-	try{httpGet([uri:"http://${ipAddress}/irrigation/status.json",timeout:5]){resp->mv=resp?.data?.ver}}
+	try{moduleRequest("GET","/irrigation/status.json",[timeout:5]){resp->mv=resp?.data?.ver}}
 	catch(e){logDebug"Module protocol probe via status.json skipped (${e.message})"}
 	try{
 		if(!mv){def r=parseIfString(sendRainbirdCommand("03",1),"moduleFirmwareProbe");def d=r?.result?.data;if(d){mv=parseFirmwareVersion(d)}}
@@ -921,6 +923,23 @@ private parseProgramZones(hex){
     return zones
 }
 
+private moduleSchemes(){def t=settings?.transport?:"auto";if(t=="https")return["https"];if(t=="http")return["http"];return atomicState.moduleScheme=="http"?["http","https"]:["https","http"]}
+private moduleRequest(String method,String path,Map extra,Closure handler){
+	def lastErr=null
+	for(scheme in moduleSchemes()){
+		def params=[uri:"${scheme}://${ipAddress}${path}"]+extra;if(scheme=="https")params.ignoreSSLIssues=true
+		try{
+			if(method=="POST"){httpPost(params,handler)}else{httpGet(params,handler)}
+			if(atomicState.moduleScheme!=scheme){atomicState.moduleScheme=scheme;logInfo"Module transport: using ${scheme.toUpperCase()}"}
+			return
+		}catch(e){
+			if(e?.class?.simpleName=="HttpResponseException")throw e
+			lastErr=e;logDebug"moduleRequest(): ${scheme.toUpperCase()} ${path} failed (${e.message})"
+		}
+	}
+	if(lastErr)throw lastErr
+}
+
 /* =============================== Communication / Crypto =============================== */
 private sendRainbirdCommand(cmdHex,length=1){
 	if(cmdBusy){logDebug"Command skipped; another command already in progress (${cmdHex})";return null}
@@ -930,9 +949,8 @@ private sendRainbirdCommand(cmdHex,length=1){
 		def id=Math.floor(now()/1000)
 		def payload=JsonOutput.toJson([id:id,jsonrpc:"2.0",method:"tunnelSip",params:[data:cmdHex,length:length]])
 		def enc=encryptRainbird(payload,password)
-		def params=[uri:"http://${ipAddress}/stick",contentType:"application/octet-stream",requestContentType:"application/octet-stream",body:enc]
 		def response=null
-		httpPost(params){resp->response=decryptRainbird(resp.data.bytes,password)}
+		moduleRequest("POST","/stick",[contentType:"application/octet-stream",requestContentType:"application/octet-stream",body:enc]){resp->response=decryptRainbird(resp.data.bytes,password)}
 		if(response){
 			successStreak=Math.min((successStreak?:0)+1,10)
 			if(successStreak>5&&delayMs>minDelay)delayMs=Math.max(minDelay,delayMs-10)
