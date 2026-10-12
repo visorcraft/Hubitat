@@ -54,6 +54,7 @@
 *  1.0.2.0  –– Improved irrigation reliability by prioritizing zone control commands over background telemetry, reducing transport contention during active watering; gated maintenance polling to idle controller state.
 *  1.0.2.1  –– Added HTTPS transport for LNK2 module firmware that refuses plain HTTP on /stick; new Module Transport preference (Auto tries HTTPS then falls back to HTTP for first-generation LNK; remembers the working scheme).
 *  1.0.2.2  –– Fixed runZone() on legacy (≤2.10) controllers rejecting opcode 03; now always uses ManuallyRunStation (39 + 2-byte zone + duration), matching pyrainbird.
+*  1.0.2.3  –– Fixed BF active-zone decoding reporting zone 10 instead of 1 on non-hybrid controllers; first payload byte is always skipped (pyrainbird format).
 */
 
 import groovy.transform.Field
@@ -66,7 +67,7 @@ import javax.crypto.spec.IvParameterSpec
 import java.io.ByteArrayOutputStream
 
 @Field static final String DRIVER_NAME     = "Rain Bird LNK/LNK2 WiFi Module Controller"
-@Field static final String DRIVER_VERSION  = "1.0.2.2"
+@Field static final String DRIVER_VERSION  = "1.0.2.3"
 @Field static final String DRIVER_MODIFIED = "2026.10.12"
 @Field static final String PAD="\u0016"
 @Field static final int BLOCK_SIZE=16
@@ -748,10 +749,9 @@ private verifyActiveZone(data=null,passive=false){
 		if(d?.startsWith("BF")){
 			def payload=d.substring(2);def bytes=[];for(int i=0;i<payload.size();i+=2)bytes<<payload.substring(i,i+2);def active=0
 			bytes.eachWithIndex{byteHex,byteIndex->
-				if(hybrid&&byteIndex==0)return
-				def b=Integer.parseInt(byteHex,16);for(int bit=0;bit<8;bit++){if((b&(1<<bit))!=0){active=hybrid?((byteIndex-1)*8)+bit+1:(byteIndex*8)+bit+1}}
+				if(byteIndex==0)return
+				def b=Integer.parseInt(byteHex,16);for(int bit=0;bit<8;bit++){if((b&(1<<bit))!=0){active=((byteIndex-1)*8)+bit+1}}
 			}
-			if(!hybrid&&isLegacyFirmware(3.0)&&active>0)active++
 			zone=active;watering=zone>0;logDebug"verifyActiveZone(): decoded BF mask=${String.format('%02X',mask)} → zone=${zone}"
 		}else if(legacy&&d=="003F02"){
 			logInfo"verifyActiveZone(): Legacy firmware ≤2.10 returned minimal ACK (003F02); assuming idle."
