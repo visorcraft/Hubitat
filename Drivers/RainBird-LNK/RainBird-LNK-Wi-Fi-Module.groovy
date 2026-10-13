@@ -60,6 +60,7 @@
 *  1.0.2.6  –– Added controller model name mapping (e.g. 010A → ESP-TM2) to the model attribute; raw model code retained.
 *  1.0.2.7  –– Added program schedule retrieval via RetrieveScheduleRequest (opcode 0x20), as used by pyrainbird; ESP-TM2 (firmware 2.10) does not answer the 0x36/0x4A capability probes, so schedules were reported as unsupported. New programA–programD attributes.
 *  1.0.2.8  –– Added schedule writing via SetScheduleRequest (opcode 0x21): setProgramDays, setProgramStartTimes, setZoneRunTime, setProgramSeasonalAdjust, clearProgram. Each write is read back via 0x20 and verified.
+*  1.0.2.9  –– Restored original legacy opcode 03 zone-start encoding and legacy BF active-zone decoding (+1 bump) for non-ESP-TM2 controllers; the opcode 39 / pyrainbird BF paths now apply only to ESP-TM2 (model 010A), where they were verified.
 */
 
 import groovy.transform.Field
@@ -72,7 +73,7 @@ import javax.crypto.spec.IvParameterSpec
 import java.io.ByteArrayOutputStream
 
 @Field static final String DRIVER_NAME     = "Rain Bird LNK/LNK2 WiFi Module Controller"
-@Field static final String DRIVER_VERSION  = "1.0.2.8"
+@Field static final String DRIVER_VERSION  = "1.0.2.9"
 @Field static final String DRIVER_MODIFIED = "2026.10.13"
 @Field static final Map MODEL_NAMES=["0003":"ESP-RZXe","0005":"ESP-TM2","0006":"ST8x-WiFi","0007":"ESP-Me","0008":"ST8x-WiFi2","0009":"ESP-ME3","0010":"ESP-Me2","000A":"ESP-TM2","010A":"ESP-TM2","0099":"TBOS-BT","0100":"TBOS-BT","0103":"ESP-RZXe2","0107":"ESP-Me","0812":"ARC8"]
 @Field static final String PAD="\u0016"
@@ -229,6 +230,13 @@ private driverStatus(String controllerContext=null){
     return baseStatus
 }
 
+/* 1.0.2.9: Controllers verified to use pyrainbird-style encodings (opcode 39 zone start, BF skip-first-byte without +1).
+   Only ESP-TM2 model code 010A (firmware 2.10) has been verified; all others retain original upstream legacy behavior. */
+private boolean isPyrainbirdFormatController(){
+	def m=device.currentValue("model")?.toString()?.toUpperCase()
+	return m?.contains("(010A)")?:false
+}
+
 private boolean isLegacyFirmware(BigDecimal minVersion=3.0){
     try{
         def pvAttr=device.currentValue("controllerFirmwareVersion")
@@ -331,9 +339,11 @@ def runZone(zone,duration=null){
 			return
 		}
 		def normDur=Math.max(1,Math.min(360,duration.toInteger()))
-		def cmd="39${sprintf('%04X',z.normZone)}${sprintf('%02X',normDur)}"
+		// 1.0.2.9: ESP-TM2 (010A) rejects legacy opcode 03 → always 39 (pyrainbird); other controllers keep original upstream selection.
+		def py=isPyrainbirdFormatController();def use39=py||z.modern
+		def cmd=use39?"39${sprintf('%04X',z.normZone)}${sprintf('%02X',normDur)}":String.format("0300%02X%02X",z.normZone,normDur)
 		logDebug"runZone(): mode=${z.modern?'modern':'legacy'}, encoded=${cmd}"
-		def r=parseIfString(sendRainbirdCommand(cmd,4),"runZone");def d=r?.result?.data
+		def r=parseIfString(sendRainbirdCommand(cmd,use39?4:1),"runZone");def d=r?.result?.data
 		if(!d&&!z.modern){logInfo"runZone(): Legacy controller returned no data; using refresh() for verification";beginControllerTransition();runInMillis(CONTROLLER_TRANSITION_MS,"verifyActiveZone",[data:[zone:z.normZone]]);return}
 		if(d&&!d.endsWith("02")){
 			logInfo"Zone ${z.normZone} start acknowledged by controller.";beginControllerTransition();runInMillis(CONTROLLER_TRANSITION_MS,"verifyActiveZone",[data:[zone:z.normZone]])
@@ -932,11 +942,13 @@ private verifyActiveZone(data=null,passive=false){
 		logDebug"verifyActiveZone(): firmware=${fw} (hybrid=${hybrid}); probing opcode 0x3F for BF response"
 		def s=parseIfString(sendRainbirdCommand("3F0000",2),"verifyActiveZone");def d=s?.result?.data;raw=d
 		if(d?.startsWith("BF")){
-			def payload=d.substring(2);def bytes=[];for(int i=0;i<payload.size();i+=2)bytes<<payload.substring(i,i+2);def active=0
+			def pyBF=isPyrainbirdFormatController();def payload=d.substring(2);def bytes=[];for(int i=0;i<payload.size();i+=2)bytes<<payload.substring(i,i+2);def active=0
 			bytes.eachWithIndex{byteHex,byteIndex->
-				if(byteIndex==0)return
-				def b=Integer.parseInt(byteHex,16);for(int bit=0;bit<8;bit++){if((b&(1<<bit))!=0){active=((byteIndex-1)*8)+bit+1}}
+				if((pyBF||hybrid)&&byteIndex==0)return
+				def b=Integer.parseInt(byteHex,16);for(int bit=0;bit<8;bit++){if((b&(1<<bit))!=0){active=(pyBF||hybrid)?((byteIndex-1)*8)+bit+1:(byteIndex*8)+bit+1}}
 			}
+			// 1.0.2.9: ESP-TM2 (010A) uses pyrainbird BF layout (skip first byte, no +1); other controllers keep original upstream legacy decode/bump.
+			if(!pyBF&&!hybrid&&isLegacyFirmware(3.0)&&active>0)active++ // only bump for pre-2.9 legacy
 			zone=active;watering=zone>0;logDebug"verifyActiveZone(): decoded BF mask=${String.format('%02X',mask)} → zone=${zone}"
 		}else if(legacy&&d=="003F02"){
 			logInfo"verifyActiveZone(): Legacy firmware ≤2.10 returned minimal ACK (003F02); assuming idle."

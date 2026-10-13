@@ -1,8 +1,8 @@
 {
   "packageName": "Rain Bird LNK/LNK2 WiFi Module Controller",
   "author": "Marc Hedish",
-  "version": "1.0.2.8",
-  "releaseNotes": "v1.0.2.8 – Program schedule read (0x20) and write (0x21) with read-back verification; HTTPS transport for current LNK2 module firmware (automatic HTTP fallback for first-generation LNK), plus zone-run, active-zone, watering-state, controller-date, and model-name fixes. Further details in CHANGELOG.md",
+  "version": "1.0.2.9",
+  "releaseNotes": "v1.0.2.9 – Legacy opcode 03 / BF decoding restored for non-ESP-TM2 controllers; Program schedule read (0x20) and write (0x21) with read-back verification; HTTPS transport for current LNK2 module firmware (automatic HTTP fallback for first-generation LNK), plus zone-run, active-zone, watering-state, controller-date, and model-name fixes. Further details in CHANGELOG.md",
   "dateReleased": "2026-10-13",
   "minimumHEVersion": "2.3.6",
   "documentationLink": "https://github.com/MHedish/Hubitat/blob/main/Drivers/RainBird-LNK/README.md",
@@ -17,7 +17,7 @@
       "namespace": "MHedish",
       "location": "https://raw.githubusercontent.com/MHedish/Hubitat/refs/heads/main/Drivers/RainBird-LNK/RainBird-LNK-Wi-Fi-Module.groovy",
       "required": true,
-      "version": "1.0.2.8"
+      "version": "1.0.2.9"
     },
     {
       "id": "rainbird-lnk-wifi-zone-child",
