@@ -61,6 +61,7 @@
 *  1.0.2.7  –– Added program schedule retrieval via RetrieveScheduleRequest (opcode 0x20), as used by pyrainbird; ESP-TM2 (firmware 2.10) does not answer the 0x36/0x4A capability probes, so schedules were reported as unsupported. New programA–programD attributes.
 *  1.0.2.8  –– Added schedule writing via SetScheduleRequest (opcode 0x21): setProgramDays, setProgramStartTimes, setZoneRunTime, setProgramSeasonalAdjust, clearProgram. Each write is read back via 0x20 and verified.
 *  1.0.2.9  –– Restored original legacy opcode 03 zone-start encoding and legacy BF active-zone decoding (+1 bump) for non-ESP-TM2 controllers; the opcode 39 / pyrainbird BF paths now apply only to ESP-TM2 (model 010A), where they were verified.
+*  1.0.2.10 –– runZone() now rejects a missing, non-numeric, zero/negative, or >360 duration with a warning and sends nothing to the controller (previously 0 ran 360 minutes and null ran 2 minutes). Valid range 1–360 minutes (ESP-TM2: one minute up to six hours). advanceZone() passes its 2-minute duration explicitly; zone child On/Open maps its defaultDuration (0 = 360, unset = 15) before calling the parent.
 */
 
 import groovy.transform.Field
@@ -73,7 +74,7 @@ import javax.crypto.spec.IvParameterSpec
 import java.io.ByteArrayOutputStream
 
 @Field static final String DRIVER_NAME     = "Rain Bird LNK/LNK2 WiFi Module Controller"
-@Field static final String DRIVER_VERSION  = "1.0.2.9"
+@Field static final String DRIVER_VERSION  = "1.0.2.10"
 @Field static final String DRIVER_MODIFIED = "2026.10.13"
 @Field static final Map MODEL_NAMES=["0003":"ESP-RZXe","0005":"ESP-TM2","0006":"ST8x-WiFi","0007":"ESP-Me","0008":"ST8x-WiFi2","0009":"ESP-ME3","0010":"ESP-Me2","000A":"ESP-TM2","010A":"ESP-TM2","0099":"TBOS-BT","0100":"TBOS-BT","0103":"ESP-RZXe2","0107":"ESP-Me","0812":"ARC8"]
 @Field static final String PAD="\u0016"
@@ -151,7 +152,7 @@ metadata {
         command "setProgramSeasonalAdjust",[[name:"program",type:"ENUM",constraints:["A","B","C","D"]],[name:"percent",type:"NUMBER",description:"0–200 (100 = no adjustment)"]]
         command "clearProgram",[[name:"program",type:"ENUM",constraints:["A","B","C","D"]]]
         command "runProgram",[[name:"program",type:"ENUM",description: "Select Rain Bird program to run manually ",constraints:["A","B","C","D"]]]
-        command "runZone",[[name:"Zone Number ",type:"NUMBER"],[name:"Duration (minutes) ",type:"NUMBER"]]
+        command "runZone",[[name:"Zone Number ",type:"NUMBER"],[name:"Duration (minutes) ",type:"NUMBER",description:"1–360"]]
         command "setRainDelay",[[name:"Rain Delay (0–14 days) ",type:"NUMBER"]]
         command "stopIrrigation"
         command "advanceZone",[[name:"Advance Zone ",type:"NUMBER"]]
@@ -321,14 +322,18 @@ private normalizeZoneInput(zone){
 }
 
 def runZone(zone,duration=null){
+	// 1.0.2.10: validate before anything is queued or sent; 0/missing/invalid no longer maps to a 360- or 2-minute run.
+	def durInt=null
+	if(duration instanceof Number)durInt=(duration as BigDecimal).setScale(0,BigDecimal.ROUND_DOWN).intValue()
+	else if(duration!=null&&duration.toString().trim().isNumber())durInt=new BigDecimal(duration.toString().trim()).setScale(0,BigDecimal.ROUND_DOWN).intValue()
+	if(durInt==null||durInt<1||durInt>360){logWarn"runZone(): Invalid duration '${duration}' for zone ${zone}; must be 1–360 minutes. Nothing sent to controller.";return false}
+	duration=durInt
 	if(cmdBusy||reconnoiter||controllerTransitionActive()){
 		def delay=controllerTransitionActive()?controllerTransitionDelay():250
 		logDebug"runZone(${zone}): deferred ${delay}ms; controller transport unavailable"
 		runInMillis(delay,"deferredRunZone",[data:[zone:zone,duration:duration]])
-		return
+		return true
 	}
-	if(duration==null){duration=2;logWarn"Duration not set for starting zone ${zone}. Defaulting to 2 minutes."}
-	if(duration==0){duration=360;logDebug"Duration set to 0 → treating as manual run (360 minutes)."}
 	logDebug"Starting zone ${zone} for ${duration} minute(s)"
 	try{
 		def z=normalizeZoneInput(zone);if(!z.normZone){logWarn"runZone(): Zone ${z.reqZone} is not available on this controller (${z.validZones?.join(',')?:'unknown'})";return}
@@ -338,7 +343,7 @@ def runZone(zone,duration=null){
 			runInMillis(delay,"deferredRunZone",[data:[zone:zone,duration:duration]])
 			return
 		}
-		def normDur=Math.max(1,Math.min(360,duration.toInteger()))
+		def normDur=duration
 		// 1.0.2.9: ESP-TM2 (010A) rejects legacy opcode 03 → always 39 (pyrainbird); other controllers keep original upstream selection.
 		def py=isPyrainbirdFormatController();def use39=py||z.modern
 		def cmd=use39?"39${sprintf('%04X',z.normZone)}${sprintf('%02X',normDur)}":String.format("0300%02X%02X",z.normZone,normDur)
@@ -360,7 +365,7 @@ def advanceZone(zone=0){
 			if(validZones&&currentZone){def idx=validZones.indexOf(currentZone);encodedZone=(idx>=0&&idx<validZones.size()-1)?validZones[idx+1]:validZones[0]}
 			else{logWarn"advanceZone(): Unable to determine next zone";return}
 		}
-		logDebug"advanceZone(): computed next zone=${encodedZone}";runZone(encodedZone)
+		logDebug"advanceZone(): computed next zone=${encodedZone}";runZone(encodedZone,2)
 	}catch(e){logError"advanceZone() failed: ${e.message}"}
 }
 
@@ -449,9 +454,9 @@ def createZoneChildren(){
 
 private runChild(String dni, Object duration){
     try{
-        def zone=(dni=~/zone(\d+)/)[0][1].toInteger();def dur=(duration!=null)?duration.toInteger():null
-        runZone(zone,dur)
-    }catch(e){logError"runChild() failed: ${e.message}"}
+        def zone=(dni=~/zone(\d+)/)[0][1].toInteger()
+        return runZone(zone,duration)
+    }catch(e){logError"runChild() failed: ${e.message}";return false}
 }
 
 private stopChild(String dni){

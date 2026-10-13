@@ -18,6 +18,7 @@ Licensed under the [Apache License 2.0](https://www.apache.org/licenses/LICENSE-
 | **1.0.0.0** | Production – Depricated | Verified for use with LNK and LNK/2 modules |
 | **1.0.1.0** | Production – Depricated | Added WaterSensor capability |
 | **1.0.2.0** | Full Production | Reduced controller transport contention by prioritizing zone control commands and deferring maintenance polling during irrigation.  |
+| **1.0.2.10** | Full Production | runZone() rejects 0/missing/invalid durations (valid 1–360 min) instead of running 360 min; zone child On/Open maps defaultDuration explicitly. |
 | **1.0.2.9** | Full Production | Firmware/model-gated legacy paths: original opcode 03 zone start and legacy BF decoding restored for non-ESP-TM2 controllers. |
 | **1.0.2.8** | Full Production | Program schedule writing via opcode 0x21 with read-back verification. |
 | **1.0.2.7** | Full Production | Program schedule retrieval via opcode 0x20. |
@@ -183,6 +184,10 @@ All command, telemetry, and refresh systems are now stable under both firmware l
 
 -   **Production Release 1.0.2.9**
 -- Restored the original legacy opcode 03 zone-start encoding and legacy BF active-zone decoding (+1 bump) for controllers other than ESP-TM2 (model 010A); opcode 39 and the pyrainbird BF layout now apply only to ESP-TM2, where they were verified on firmware 2.10.
+
+-   **Production Release 1.0.2.10**
+-- runZone() now rejects a missing, non-numeric, zero/negative, or >360 duration with a warning and sends nothing to the controller (previously 0 meant a 360-minute run and a missing duration meant 2 minutes). Valid range is 1–360 minutes, matching the ESP-TM2 manual ("one minute up to six hours").
+-- advanceZone() passes its 2-minute duration explicitly. Zone child On/Open resolves defaultDuration itself (unset → 15, 0 → 360 controller maximum) and only reports on/open when the parent accepts the run.
 
 ---
 
