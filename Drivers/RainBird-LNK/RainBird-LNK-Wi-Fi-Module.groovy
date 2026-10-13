@@ -59,6 +59,7 @@
 *  1.0.2.5  –– Fixed CombinedControllerState year parsing as 4026 when the controller returns a full four-digit year.
 *  1.0.2.6  –– Added controller model name mapping (e.g. 010A → ESP-TM2) to the model attribute; raw model code retained.
 *  1.0.2.7  –– Added program schedule retrieval via RetrieveScheduleRequest (opcode 0x20), as used by pyrainbird; ESP-TM2 (firmware 2.10) does not answer the 0x36/0x4A capability probes, so schedules were reported as unsupported. New programA–programD attributes.
+*  1.0.2.8  –– Added schedule writing via SetScheduleRequest (opcode 0x21): setProgramDays, setProgramStartTimes, setZoneRunTime, setProgramSeasonalAdjust, clearProgram. Each write is read back via 0x20 and verified.
 */
 
 import groovy.transform.Field
@@ -71,7 +72,7 @@ import javax.crypto.spec.IvParameterSpec
 import java.io.ByteArrayOutputStream
 
 @Field static final String DRIVER_NAME     = "Rain Bird LNK/LNK2 WiFi Module Controller"
-@Field static final String DRIVER_VERSION  = "1.0.2.7"
+@Field static final String DRIVER_VERSION  = "1.0.2.8"
 @Field static final String DRIVER_MODIFIED = "2026.10.13"
 @Field static final Map MODEL_NAMES=["0003":"ESP-RZXe","0005":"ESP-TM2","0006":"ST8x-WiFi","0007":"ESP-Me","0008":"ST8x-WiFi2","0009":"ESP-ME3","0010":"ESP-Me2","000A":"ESP-TM2","010A":"ESP-TM2","0099":"TBOS-BT","0100":"TBOS-BT","0103":"ESP-RZXe2","0107":"ESP-Me","0812":"ARC8"]
 @Field static final String PAD="\u0016"
@@ -126,6 +127,7 @@ metadata {
         attribute "programB","string"
         attribute "programC","string"
         attribute "programD","string"
+        attribute "scheduleWriteStatus","string"
         attribute "rainDelay","number"
 		attribute "rainSensorState","enum",["bypassed","dry","wet"]
         attribute "remainingRuntime","number"
@@ -142,6 +144,11 @@ metadata {
         command "configure"
         command "disableDebugLoggingNow"
         command "getAllProgramSchedules"
+        command "setProgramDays",[[name:"program",type:"ENUM",constraints:["A","B","C","D"]],[name:"frequency",type:"ENUM",constraints:["Custom","Cyclic","Odd","Even"]],[name:"days",type:"STRING",description:"Custom only: e.g. Sun,Tue,Thu"],[name:"cycleDays",type:"NUMBER",description:"Cyclic only: interval 1–14 days"],[name:"daysRemaining",type:"NUMBER",description:"Cyclic only: days until next watering (0 = today)"]]
+        command "setProgramStartTimes",[[name:"program",type:"ENUM",constraints:["A","B","C","D"]],[name:"startTimes",type:"STRING",description:"24h HH:mm, comma separated (blank clears all)"]]
+        command "setZoneRunTime",[[name:"program",type:"ENUM",constraints:["A","B","C","D"]],[name:"zone",type:"NUMBER"],[name:"minutes",type:"NUMBER",description:"0–360 (0 removes the zone from the program)"]]
+        command "setProgramSeasonalAdjust",[[name:"program",type:"ENUM",constraints:["A","B","C","D"]],[name:"percent",type:"NUMBER",description:"0–200 (100 = no adjustment)"]]
+        command "clearProgram",[[name:"program",type:"ENUM",constraints:["A","B","C","D"]]]
         command "runProgram",[[name:"program",type:"ENUM",description: "Select Rain Bird program to run manually ",constraints:["A","B","C","D"]]]
         command "runZone",[[name:"Zone Number ",type:"NUMBER"],[name:"Duration (minutes) ",type:"NUMBER"]]
         command "setRainDelay",[[name:"Rain Delay (0–14 days) ",type:"NUMBER"]]
@@ -586,6 +593,129 @@ private getRetrieveSchedules(){
 	}
 	emitChangedEvent("programScheduleSupport",true,"Program schedules read via opcode 0x20 (active: ${summary?summary.join(', '):'none'})")
 	return true
+}
+
+/* SetScheduleRequest (0x21 → 01 21): writes one 0x20 page back with the same layout ("21" + 2-byte page + page data),
+   per pyrainbird docs/PROTOCOL_ESP_ME_TM2.md. Every write re-reads all schedule pages and verifies only the target page changed. */
+private schedulePageList(){
+	def pages=[0];int np=0
+	for(int p=0;p<4;p++){if(retrieveSchedulePage(0x10|p)){np++}else break}
+	if(!np)return null
+	(0..<np).each{pages<<(0x10|it)};(0..<np).each{pages<<(0x60|it)}
+	int zc=(device.currentValue("zoneCount")?:zonePref?:6).toInteger();(0..<((int)Math.ceil(zc/2.0))).each{pages<<(0x80|it)}
+	return[pages:pages,programs:np,zones:zc]
+}
+private readSchedulePages(List pages){
+	def m=[:];for(p in pages){def d=retrieveSchedulePage(p);if(!d){logWarn"readSchedulePages(): page ${String.format('%04X',p)} unreadable";return null};m[p]=d.substring(6)}
+	return m
+}
+private scheduleWriteGuard(){
+	if(cmdBusy||reconnoiter||controllerTransitionActive()){logWarn"Schedule write skipped; controller busy or refresh in progress";return false}
+	if(device.currentValue("watering")?.toString()=="true"){logWarn"Schedule write skipped while watering";return false}
+	return true
+}
+private programIndex(prog,int np){
+	def i=["A","B","C","D"].indexOf(prog?.toString()?.trim()?.toUpperCase())
+	if(i<0||i>=np){logWarn"Invalid program ${prog}; controller has ${np} program(s)";return null}
+	return i
+}
+private writeSchedulePage(Map layout,Map before,int page,String body,String what){
+	def key=String.format('%04X',page)
+	if(before[page]==body){logInfo"${what}: no change";emitEvent("scheduleWriteStatus","No change: ${what}");return true}
+	if(body.length()!=before[page].length()){logError"${what}: encoded page ${key} has wrong length";return false}
+	def d=parseIfString(sendRainbirdCommand("21${key}${body}",3+(int)(body.length()/2)),"setSchedule-${key}")?.result?.data
+	if(d!="0121"){logError"${what}: controller rejected page ${key} (${d?:'no response'})";emitEvent("scheduleWriteStatus","Rejected: ${what}");return false}
+	def after=readSchedulePages(layout.pages)
+	def expected=before+[(page):body]
+	def bad=after?layout.pages.findAll{after[it]!=expected[it]}:layout.pages
+	if(bad){
+		logError"${what}: verification failed on page(s) ${bad.collect{String.format('%04X',it)}.join(', ')}; restoring page ${key}"
+		if(after?.get(page)!=before[page])sendRainbirdCommand("21${key}${before[page]}",3+(int)(before[page].length()/2))
+		emitEvent("scheduleWriteStatus","Verify FAILED: ${what}");return false
+	}
+	logInfo"${what}: written and verified (page ${key})";emitEvent("scheduleWriteStatus","OK: ${what}")
+	getRetrieveSchedules();return true
+}
+private scheduleWriteSetup(prog){
+	if(!scheduleWriteGuard())return null
+	def layout=schedulePageList();if(!layout){logWarn"Schedule write not supported (opcode 0x20 unavailable)";return null}
+	def pi=programIndex(prog,layout.programs);if(pi==null)return null
+	def before=readSchedulePages(layout.pages);if(!before)return null
+	return[layout:layout,before:before,pi:pi]
+}
+private programInfoBody(String hex,Map changes){
+	def f=[];for(int i=0;i<12;i+=2)f<<Integer.parseInt(hex.substring(i,i+2),16)
+	["mask","cycle","remaining","daysOff","seasonal","freq"].eachWithIndex{k,i->if(changes.containsKey(k))f[i]=changes[k]}
+	return f.collect{String.format('%02X',it)}.join()+hex.substring(12)
+}
+
+def setProgramDays(prog,frequency,days=null,cycleDays=null,daysRemaining=null){
+	def freqs=["CUSTOM":0,"CYCLIC":1,"ODD":2,"EVEN":3];def fc=freqs[frequency?.toString()?.trim()?.toUpperCase()]
+	if(fc==null){logWarn"setProgramDays(): frequency must be Custom, Cyclic, Odd or Even";return}
+	def ch=[freq:fc]
+	if(fc==0){
+		def names=['SUN','MON','TUE','WED','THU','FRI','SAT'];def tok=(days?:'').toString().toUpperCase().split(/[\s,]+/).findAll{it}
+		if(!tok||tok.any{!names.contains(it.take(3))||it.size()<3}){logWarn"setProgramDays(): days must be a list like Sun,Tue,Thu";return}
+		ch.mask=tok.collect{1<<names.indexOf(it.take(3))}.sum()
+	}else if(fc==1){
+		def c=cycleDays?.toString()?.isInteger()?cycleDays.toString().toInteger():null;def r=daysRemaining==null||daysRemaining.toString()==''?0:(daysRemaining.toString().isInteger()?daysRemaining.toString().toInteger():-1)
+		if(c==null||c<1||c>14){logWarn"setProgramDays(): cycleDays must be 1–14";return}
+		if(r<0||r>=c){logWarn"setProgramDays(): daysRemaining must be 0–${c-1}";return}
+		ch.cycle=c;ch.remaining=r
+	}
+	def w=scheduleWriteSetup(prog);if(!w)return
+	int page=0x10|w.pi;writeSchedulePage(w.layout,w.before,page,programInfoBody(w.before[page],ch),"Program ${prog} days → ${frequency}${fc==0?" ${days}":fc==1?" every ${ch.cycle}":''}")
+}
+
+def setProgramSeasonalAdjust(prog,percent){
+	def v=percent?.toString()?.isInteger()?percent.toString().toInteger():null
+	if(v==null||v<0||v>200){logWarn"setProgramSeasonalAdjust(): percent must be 0–200";return}
+	def w=scheduleWriteSetup(prog);if(!w)return
+	int page=0x10|w.pi;writeSchedulePage(w.layout,w.before,page,programInfoBody(w.before[page],[seasonal:v]),"Program ${prog} seasonal adjust → ${v}%")
+}
+
+def setProgramStartTimes(prog,startTimes=null){
+	def tok=(startTimes?:'').toString().split(/[\s,]+/).findAll{it};def mins=[]
+	for(t in tok){
+		def m=(t=~/^([01]?\d|2[0-3]):([0-5]\d)$/);if(!m.matches()){logWarn"setProgramStartTimes(): invalid time '${t}' (use 24h HH:mm)";return}
+		mins<<(m[0][1].toInteger()*60+m[0][2].toInteger())
+	}
+	if(mins.unique(false).size()!=mins.size()){logWarn"setProgramStartTimes(): duplicate start times";return}
+	def w=scheduleWriteSetup(prog);if(!w)return
+	int page=0x60|w.pi;int slots=(int)(w.before[page].length()/4)
+	if(mins.size()>slots){logWarn"setProgramStartTimes(): controller allows at most ${slots} start times";return}
+	def body=(mins.sort()+[0xFFFF]*(slots-mins.size())).collect{String.format('%04X',it)}.join()
+	writeSchedulePage(w.layout,w.before,page,body,"Program ${prog} start times → ${mins?tok.join(', '):'none'}")
+}
+
+def setZoneRunTime(prog,zone,minutes){
+	def z=zone?.toString()?.isInteger()?zone.toString().toInteger():null;def m=minutes?.toString()?.isInteger()?minutes.toString().toInteger():null
+	if(m==null||m<0||m>360){logWarn"setZoneRunTime(): minutes must be 0–360";return}
+	def w=scheduleWriteSetup(prog);if(!w)return
+	if(z==null||z<1||z>w.layout.zones){logWarn"setZoneRunTime(): zone must be 1–${w.layout.zones}";return}
+	int page=0x80|((int)((z-1)/2));int n=w.layout.programs;def hex=w.before[page]
+	def v=[];for(int i=0;i+4<=hex.length();i+=4)v<<Integer.parseInt(hex.substring(i,i+4),16)
+	if(v.size()!=2*n){logError"setZoneRunTime(): unexpected run time page layout (${hex})";return}
+	v[((z-1)%2)*n+w.pi]=m
+	writeSchedulePage(w.layout,w.before,page,v.collect{String.format('%04X',it)}.join(),"Program ${prog} zone ${z} run time → ${m} min")
+}
+
+def clearProgram(prog){
+	def w=scheduleWriteSetup(prog);if(!w)return
+	int pi=w.pi;int n=w.layout.programs;def ok=true
+	int sp=0x60|pi;ok=writeSchedulePage(w.layout,w.before,sp,"FFFF"*((int)(w.before[sp].length()/4)),"Program ${prog} clear start times")
+	if(!ok)return
+	def before=readSchedulePages(w.layout.pages);if(!before)return
+	int ip=0x10|pi;ok=writeSchedulePage(w.layout,before,ip,programInfoBody(before[ip],[mask:0,freq:0]),"Program ${prog} clear days")
+	w.layout.pages.findAll{it>=0x80}.each{page->
+		if(!ok)return
+		before=readSchedulePages(w.layout.pages);if(!before){ok=false;return}
+		def hex=before[page];def v=[];for(int i=0;i+4<=hex.length();i+=4)v<<Integer.parseInt(hex.substring(i,i+4),16)
+		if(v.size()!=2*n){logError"clearProgram(): unexpected run time page layout (${hex})";ok=false;return}
+		v[pi]=0;v[n+pi]=0
+		ok=writeSchedulePage(w.layout,before,page,v.collect{String.format('%04X',it)}.join(),"Program ${prog} clear run times (page ${String.format('%04X',page)})")
+	}
+	if(ok)logInfo"Program ${prog} cleared"
 }
 
 def getProgramSchedule(prog='A'){
