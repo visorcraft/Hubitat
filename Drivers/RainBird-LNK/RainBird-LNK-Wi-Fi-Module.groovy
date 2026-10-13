@@ -58,6 +58,7 @@
 *  1.0.2.4  –– Fixed CombinedControllerState reporting Watering while idle; watering is now derived from the active station (zone > 0), with Rain Delay when a delay is set.
 *  1.0.2.5  –– Fixed CombinedControllerState year parsing as 4026 when the controller returns a full four-digit year.
 *  1.0.2.6  –– Added controller model name mapping (e.g. 010A → ESP-TM2) to the model attribute; raw model code retained.
+*  1.0.2.7  –– Added program schedule retrieval via RetrieveScheduleRequest (opcode 0x20), as used by pyrainbird; ESP-TM2 (firmware 2.10) does not answer the 0x36/0x4A capability probes, so schedules were reported as unsupported. New programA–programD attributes.
 */
 
 import groovy.transform.Field
@@ -70,8 +71,8 @@ import javax.crypto.spec.IvParameterSpec
 import java.io.ByteArrayOutputStream
 
 @Field static final String DRIVER_NAME     = "Rain Bird LNK/LNK2 WiFi Module Controller"
-@Field static final String DRIVER_VERSION  = "1.0.2.6"
-@Field static final String DRIVER_MODIFIED = "2026.10.12"
+@Field static final String DRIVER_VERSION  = "1.0.2.7"
+@Field static final String DRIVER_MODIFIED = "2026.10.13"
 @Field static final Map MODEL_NAMES=["0003":"ESP-RZXe","0005":"ESP-TM2","0006":"ST8x-WiFi","0007":"ESP-Me","0008":"ST8x-WiFi2","0009":"ESP-ME3","0010":"ESP-Me2","000A":"ESP-TM2","010A":"ESP-TM2","0099":"TBOS-BT","0100":"TBOS-BT","0103":"ESP-RZXe2","0107":"ESP-Me","0812":"ARC8"]
 @Field static final String PAD="\u0016"
 @Field static final int BLOCK_SIZE=16
@@ -121,6 +122,10 @@ metadata {
         attribute "model","string"
 		attribute "moduleProtocolVersion","string"
         attribute "programScheduleSupport","boolean"
+        attribute "programA","string"
+        attribute "programB","string"
+        attribute "programC","string"
+        attribute "programD","string"
         attribute "rainDelay","number"
 		attribute "rainSensorState","enum",["bypassed","dry","wet"]
         attribute "remainingRuntime","number"
@@ -538,6 +543,51 @@ def runProgram(programCode){
 
 private isStubProgramResponse(hex){return["003A02","003802","B60000"].contains(hex)}
 
+/* RetrieveScheduleRequest (0x20 → A0), as used by pyrainbird for ESP-TM2 / ESP-Me:
+   page 0000 = controller info, 001p = program info, 006p = start times, 0080+n = run times for stations 2n+1 and 2n+2 */
+private retrieveSchedulePage(int page){
+	def d=parseIfString(sendRainbirdCommand(String.format("20%04X",page),3),"retrieveSchedule-${String.format('%04X',page)}")?.result?.data
+	return(d?.startsWith("A0")&&d.length()>6)?d:null
+}
+
+private getRetrieveSchedules(){
+	if(!retrieveSchedulePage(0)){logDebug"getRetrieveSchedules(): opcode 0x20 not supported; using legacy program queries";return false}
+	def names=["A","B","C","D"];def progs=[]
+	for(int p=0;p<names.size();p++){
+		def info=retrieveSchedulePage(0x10|p);if(!info)break
+		def f=[];for(int i=6;i+2<=info.length();i+=2)f<<Integer.parseInt(info.substring(i,i+2),16)
+		if(f.size()<6)break
+		def st=retrieveSchedulePage(0x60|p);def starts=[]
+		if(st)for(int i=6;i+4<=st.length();i+=4){def v=Integer.parseInt(st.substring(i,i+4),16);if(v!=0xFFFF)starts<<String.format('%02d:%02d',(int)(v/60),v%60)}
+		progs<<[name:names[p],mask:f[0],period:f[1],synchro:f[2],daysOff:f[3],freq:f[5],starts:starts,runs:[:]]
+	}
+	if(!progs){logDebug"getRetrieveSchedules(): no program pages returned";return false}
+	def zc=(device.currentValue("zoneCount")?:zonePref?:6).toInteger()
+	for(int page=0;page<Math.ceil(zc/2.0);page++){
+		def d=retrieveSchedulePage(0x80|page);if(!d)continue
+		def v=[];for(int i=6;i+4<=d.length();i+=4)v<<Integer.parseInt(d.substring(i,i+4),16)
+		int n=(int)(v.size()/2)
+		[0,1].each{k->def zone=page*2+k+1;if(zone<=zc)progs.eachWithIndex{pg,idx->if(idx<n&&v[k*n+idx]>0)pg.runs[zone]=v[k*n+idx]}}
+	}
+	def dayNames=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];def summary=[]
+	progs.each{pg->
+		def days
+		switch(pg.freq){
+			case 1:days="Every ${pg.period} day(s) (next in ${pg.synchro})";break
+			case 2:days="Odd days";break
+			case 3:days="Even days";break
+			default:days=(0..6).findAll{pg.mask&(1<<it)}.collect{dayNames[it]}.join(', ')?:'None'
+		}
+		def off=pg.daysOff?(0..6).findAll{pg.daysOff&(1<<it)}.collect{dayNames[it]}.join(', '):null
+		def active=pg.starts&&pg.runs
+		def txt=active?"${days}${off?" (days off: ${off})":''} | Starts ${pg.starts.join(', ')} | Zones ${pg.runs.collect{z,m->"${z}:${m}m"}.join(', ')}":"Not scheduled"
+		emitChangedEvent("program${pg.name}",txt,"Program ${pg.name}: ${txt}");logInfo"Program ${pg.name}: ${txt}"
+		if(active)summary<<pg.name
+	}
+	emitChangedEvent("programScheduleSupport",true,"Program schedules read via opcode 0x20 (active: ${summary?summary.join(', '):'none'})")
+	return true
+}
+
 def getProgramSchedule(prog='A'){
     if(isLegacyFirmware(2.5)){logDebug"Skipping getProgramSchedule(): requires firmware ≥2.6";return false}
     def map=["A":0,"B":1,"C":2,"D":3];def pid=map[prog?.toUpperCase()]
@@ -564,6 +614,7 @@ def getProgramSchedule(prog='A'){
 def getAllProgramSchedules(){
 	if(cmdBusy){logWarn"Get all stations command skipped; another command already in progress";return}
 	if(reconnoiter){logWarn"Get all stations command skipped during refresh cycle";return}
+    if(getRetrieveSchedules())return
     if(isLegacyFirmware(2.5)){logDebug"Skipping getAllProgramSchedules(): requires firmware ≥2.6";emitEvent("programScheduleSupport",false);return}
     if(!getCommandSupport("36")&&!getCommandSupport("4A")){logWarn"Program schedule query not supported on this controller";emitEvent("programScheduleSupport",false);return}
     if(!isLegacyFirmware(3.0)){

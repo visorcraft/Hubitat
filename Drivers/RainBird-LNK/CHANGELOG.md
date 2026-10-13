@@ -18,6 +18,7 @@ Licensed under the [Apache License 2.0](https://www.apache.org/licenses/LICENSE-
 | **1.0.0.0** | Production – Depricated | Verified for use with LNK and LNK/2 modules |
 | **1.0.1.0** | Production – Depricated | Added WaterSensor capability |
 | **1.0.2.0** | Full Production | Reduced controller transport contention by prioritizing zone control commands and deferring maintenance polling during irrigation.  |
+| **1.0.2.7** | Full Production | Program schedule retrieval via opcode 0x20. |
 | **1.0.2.6** | Full Production | HTTPS transport for current LNK2 firmware (HTTP fallback for LNK) and ESP-TM2 / firmware 2.10 parsing and zone-run fixes. |
 
 ---
@@ -170,6 +171,9 @@ All command, telemetry, and refresh systems are now stable under both firmware l
 -- Watering state is now derived from the active station; idle controllers no longer show Watering.
 -- Fixed controller date year parsing as 4026.
 -- Added controller model name mapping (e.g. 010A → ESP-TM2).
+
+-   **Production Release 1.0.2.7**
+-- Added program schedule retrieval via RetrieveScheduleRequest (opcode 0x20); ESP-TM2 controllers do not answer the 0x36/0x4A capability probes, so schedules were previously reported as unsupported. New programA–programD attributes.
 
 ---
 
